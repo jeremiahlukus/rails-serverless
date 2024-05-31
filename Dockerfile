@@ -1,62 +1,57 @@
-# syntax = docker/dockerfile:1
-
-# Make sure RUBY_VERSION matches the Ruby version in .ruby-version and Gemfile
-ARG RUBY_VERSION=3.2.0
-FROM registry.docker.com/library/ruby:$RUBY_VERSION-slim as base
-
-# Rails app lives here
-WORKDIR /rails
-
-# Set production environment
-ENV RAILS_ENV="production" \
-    BUNDLE_DEPLOYMENT="1" \
-    BUNDLE_PATH="/usr/local/bundle" \
-    BUNDLE_WITHOUT="development"
+# Shared image, envs, packages for both devcontainer & prod.
+FROM --platform=linux/arm64 ruby:3.2.2-bullseye
 
 
-# Throw-away build stage to reduce size of final image
-FROM base as build
+# Create a directory for the Lambda function
+WORKDIR "/app"
 
-# Install packages needed to build gems
-RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y build-essential git libpq-dev libvips pkg-config
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends build-essential curl git jq pkg-config libxml2 unzip 
 
-# Install application gems
-COPY Gemfile Gemfile.lock ./
-RUN bundle install && \
-    rm -rf ~/.bundle/ "${BUNDLE_PATH}"/ruby/*/cache "${BUNDLE_PATH}"/ruby/*/bundler/gems/*/.git && \
-    bundle exec bootsnap precompile --gemfile
+RUN apt-get install -y -qq --no-install-recommends libpq-dev && rm -rf /var/lib/apt/lists /var/cache/apt/archives
 
-# Copy application code
+# Install JavaScript dependencies
+ARG NODE_VERSION=20.12.2
+ARG YARN_VERSION=1.22.22
+ENV PATH=/usr/local/node/bin:$PATH
+RUN curl -sL https://github.com/nodenv/node-build/archive/master.tar.gz | tar xz -C /tmp/ && \
+    /tmp/node-build-master/bin/node-build "${NODE_VERSION}" /usr/local/node && \
+    npm install -g yarn@$YARN_VERSION && \
+    rm -rf /tmp/node-build-master
+
+# RUN curl -fsSL https://nodejs.org/dist/v20.12.2/node-v20.12.2-linux-arm64.tar.xz | tar -xJf - -C /usr/local --strip-components=1
+# RUN npm install -g yarn
+# Auto apt build_stage packages
+
+# Install the AWS Lambda Runtime Interface Client & Crypteia for secure SSM-backed envs.
+RUN gem install 'aws_lambda_ric'
+COPY --from=ghcr.io/rails-lambda/crypteia-extension-debian:1 /opt /opt
+ENTRYPOINT [ "/usr/local/bundle/bin/aws_lambda_ric" ]
+ENV LD_PRELOAD=/opt/lib/libcrypteia.so
+
+
+# Copy prod application files and set handler.
+# ENV BUNDLE_IGNORE_CONFIG=1
+# ENV BUNDLE_PATH=./vendor/bundle
+# ENV BUNDLE_CACHE_PATH=./vendor/cache
+# ENV RAILS_SERVE_STATIC_FILES=1
+
 COPY . .
 
-# Precompile bootsnap code for faster boot times
-RUN bundle exec bootsnap precompile app/ lib/
+# install lambda-insights
+COPY LambdaInsightsExtension-Arm64.zip /opt
+RUN unzip /opt/LambdaInsightsExtension-Arm64.zip -d /opt/
 
-# Precompiling assets for production without requiring secret RAILS_MASTER_KEY
-RUN SECRET_KEY_BASE_DUMMY=1 ./bin/rails assets:precompile
+RUN bundle lock --add-platform $(ruby -e 'puts RUBY_PLATFORM')
+
+RUN bundle install
 
 
-# Final stage for app image
-FROM base
+ENV NODE_OPTIONS="--openssl-legacy-provider"
+RUN yarn install
 
-# Install packages needed for deployment
-RUN apt-get update -qq && \
-    apt-get install --no-install-recommends -y curl libvips postgresql-client && \
-    rm -rf /var/lib/apt/lists /var/cache/apt/archives
+ENV BOOTSNAP_CACHE_DIR=/var/task/tmp/cache
+RUN bundle exec bootsnap precompile --gemfile . \
+    && bundle exec ruby config/environment.rb
 
-# Copy built artifacts: gems, application
-COPY --from=build /usr/local/bundle /usr/local/bundle
-COPY --from=build /rails /rails
 
-# Run and own only the runtime files as a non-root user for security
-RUN useradd rails --create-home --shell /bin/bash && \
-    chown -R rails:rails db log storage tmp
-USER rails:rails
-
-# Entrypoint prepares the database.
-ENTRYPOINT ["/rails/bin/docker-entrypoint"]
-
-# Start the server by default, this can be overwritten at runtime
-EXPOSE 3000
-CMD ["./bin/rails", "server"]
+CMD ["config/environment.Lamby.cmd"]

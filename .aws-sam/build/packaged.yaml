@@ -1,0 +1,135 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: RailsApp
+Parameters:
+  RailsEnv:
+    Type: String
+    Default: staging
+Globals:
+  Function:
+    Architectures:
+    - arm64
+    AutoPublishAlias: live
+    DeploymentPreference:
+      Type: AllAtOnce
+    Environment:
+      Variables:
+        RAILS_SERVERLESS_DATABASE_PASSWORD: test
+    Timeout: 30
+Resources:
+  JobsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      ReceiveMessageWaitTimeSeconds: 0
+      VisibilityTimeout: 300
+    Metadata:
+      SamResourceId: JobsQueue
+  RailsLambda:
+    Type: AWS::Serverless::Function
+    Metadata:
+      DockerContext: /Users/jeremiah.parrack/freelance/rails-serverlerss
+      DockerTag: web
+      Dockerfile: Dockerfile
+      SamResourceId: RailsLambda
+    Properties:
+      Policies:
+      - CloudWatchLambdaInsightsExecutionRolePolicy
+      - Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - sqs:*
+          Resource:
+          - Fn::Sub: arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${JobsQueue.QueueName}
+      FunctionUrlConfig:
+        AuthType: NONE
+      MemorySize: 1792
+      PackageType: Image
+      ImageUri: 533085732793.dkr.ecr.us-east-1.amazonaws.com/rails:railslambda-33c62e12a7ac-web
+  PingHealthCheckLambda:
+    Type: AWS::Serverless::Function
+    Description:
+      Fn::Sub: Lambda function for health check pings in ${RailsEnv} environment to
+        keep Rails lambda warm
+    Properties:
+      Handler: ping.handler
+      Runtime: ruby3.2
+      CodeUri: s3://railsapp-us-east-1/1dc2152fd57274728e8aa294cf5b6a66
+      Policies:
+      - AWSLambdaBasicExecutionRole
+      - Statement:
+          Effect: Allow
+          Action: lambda:InvokeFunction
+          Resource:
+            Fn::GetAtt:
+            - RailsLambda
+            - Arn
+    Metadata:
+      SamResourceId: PingHealthCheckLambda
+  HealthCheckRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: cron(0/3 * * * ? *)
+      Targets:
+      - Id: HealthCheckLambdaTarget
+        Arn:
+          Fn::GetAtt:
+          - PingHealthCheckLambda
+          - Arn
+        Input: '{"EVENT_RULE": "HEALTHCHECK"}'
+    Metadata:
+      SamResourceId: HealthCheckRule
+  PermissionForEventsToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Ref: PingHealthCheckLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - HealthCheckRule
+        - Arn
+    Metadata:
+      SamResourceId: PermissionForEventsToInvokeLambda
+  JobsLambda:
+    Type: AWS::Serverless::Function
+    Metadata:
+      DockerContext: /Users/jeremiah.parrack/freelance/rails-serverlerss
+      DockerTag: jobs
+      Dockerfile: Dockerfile
+      SamResourceId: JobsLambda
+    Properties:
+      Events:
+        SQSJobs:
+          Type: SQS
+          Properties:
+            Queue:
+              Fn::GetAtt:
+              - JobsQueue
+              - Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+            - ReportBatchItemFailures
+      ImageConfig:
+        Command:
+        - config/environment.Lambdakiq.cmd
+      MemorySize: 1792
+      PackageType: Image
+      Policies:
+      - Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - sqs:*
+          Resource:
+          - Fn::Sub: arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${JobsQueue.QueueName}
+      Timeout: 300
+      ImageUri: 533085732793.dkr.ecr.us-east-1.amazonaws.com/rails:jobslambda-6044796730fa-jobs
+Outputs:
+  RailsLambdaUrl:
+    Description: Lambda Function URL
+    Value:
+      Fn::GetAtt:
+      - RailsLambdaUrl
+      - FunctionUrl

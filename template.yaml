@@ -1,0 +1,224 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: RailsApp
+
+Parameters:
+  # SubnetIds:
+  #   Type: CommaDelimitedList
+  #   Description: Comma-separated list of subnet IDs for the Lambda function's VPC configuration.
+  # SecurityGroupIds:
+  #   Type: CommaDelimitedList
+  #   Description: Comma-separated list of security group IDs for the Lambda function's VPC configuration.
+  RailsEnv:
+    Type: String
+    Default: staging
+
+Globals:
+  Function:
+    # VpcConfig:
+    #   SubnetIds: !Ref SubnetIds
+    #   SecurityGroupIds: !Ref SecurityGroupIds
+    Architectures:
+      - arm64
+    AutoPublishAlias: live
+    DeploymentPreference:
+      Type: AllAtOnce
+    Environment:
+      Variables:
+        RAILS_SERVERLESS_DATABASE_PASSWORD: "test"
+    #     EXAMPLE_VAR: !Sub "x-crypteia-ssm-path:/RailsApp/${RailsEnv}"
+    #     EXAMPLE_VAR2: x-crypteia
+    #     RAILS_LOG_TO_STDOUT: x-crypteia
+    #     JOBS_QUEUE_NAME: !GetAtt JobsQueue.QueueName
+    #     RAILS_ENV: !Ref RailsEnv
+    Timeout: 30
+
+Resources:
+  JobsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      ReceiveMessageWaitTimeSeconds: 0
+      VisibilityTimeout: 300
+
+  RailsLambda:
+    Type: AWS::Serverless::Function
+    Metadata:
+      DockerContext: .
+      Dockerfile: Dockerfile
+      DockerTag: web
+    Properties:
+      Policies:
+        - CloudWatchLambdaInsightsExecutionRolePolicy
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - sqs:*
+              Resource:
+                - !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${JobsQueue.QueueName}
+      FunctionUrlConfig:
+        AuthType: NONE
+      MemorySize: 1024
+      PackageType: Image
+
+
+  PingHealthCheckLambda:
+    Type: AWS::Serverless::Function
+    Description: !Sub "Lambda function for health check pings in ${RailsEnv} environment to keep Rails lambda warm"
+    Properties:
+      Handler: ping.handler
+      Runtime: ruby3.2
+      CodeUri: lambda/
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Statement:
+            Effect: Allow
+            Action: "lambda:InvokeFunction"
+            Resource: !GetAtt RailsLambda.Arn
+ 
+  HealthCheckRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: "cron(0/3 * * * ? *)"  # Every 3 minutes
+      Targets:
+        - Id: "HealthCheckLambdaTarget"
+          Arn: !GetAtt PingHealthCheckLambda.Arn
+          Input: '{"EVENT_RULE": "HEALTHCHECK"}'
+
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: 
+        Ref: "PingHealthCheckLambda"
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: 
+        Fn::GetAtt: 
+          - "HealthCheckRule"
+          - "Arn"
+
+  JobsLambda:
+    Type: AWS::Serverless::Function
+    Metadata:
+      DockerContext: .
+      Dockerfile: Dockerfile
+      DockerTag: jobs
+    Properties:
+      Events: 
+        SQSJobs:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt JobsQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+      ImageConfig:
+        Command: ["config/environment.Lambdakiq.cmd"]
+      MemorySize: 1024
+      PackageType: Image
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - sqs:*
+              Resource:
+                - !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${JobsQueue.QueueName}
+      Timeout: 300
+
+  # RailsLambdaUrlCF:
+  #   Type: AWS::Lambda::Url
+  #   Properties:
+  #     AuthType: NONE
+  #     TargetFunctionArn: !GetAtt RailsLambda.Arn
+
+  # CloudFrontDistribution:
+  #   Type: AWS::CloudFront::Distribution
+  #   DependsOn: RailsLambda
+  #   Properties:
+  #     DistributionConfig:
+  #       Aliases:
+  #         - !Sub "${RailsEnv}.example.com"
+  #       Comment: !Sub "${RailsEnv} lamby managed"
+  #       Enabled: true
+  #       HttpVersion: "http2"
+  #       IPV6Enabled: true
+  #       PriceClass: "PriceClass_100"
+  #       DefaultCacheBehavior:
+  #         AllowedMethods:
+  #           - DELETE
+  #           - GET
+  #           - HEAD
+  #           - OPTIONS
+  #           - PATCH
+  #           - POST
+  #           - PUT
+  #         CachePolicyId: "658327ea-f89d-4fab-a63d-7e88639e58f6"
+  #         CachedMethods:
+  #           - GET
+  #           - HEAD
+  #         Compress: false
+  #         DefaultTTL: 0
+  #         MaxTTL: 0
+  #         MinTTL: 0
+  #         OriginRequestPolicyId: "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+  #         ResponseHeadersPolicyId: "5cc3b908-e619-4b99-88e5-2cf7f45965bd"
+  #         TargetOriginId: "DefaultOrigin"
+  #         ViewerProtocolPolicy: "redirect-to-https"
+  #       Origins:
+  #         - Id: "DefaultOrigin"
+  #           DomainName: 
+  #             # Remove 'https://' from the FunctionUrl
+  #             !Join
+  #               - ''  # Join with an empty delimiter
+  #               - 
+  #                 # Select the domain part of the URL
+  #                 - !Select 
+  #                     - 2  # Select the third element (index 2) from the split parts
+  #                     - !Split 
+  #                         - '/'  # Split the URL by '/'
+  #                         - !GetAtt RailsLambdaUrl.FunctionUrl  # Get the full Function URL
+  #           CustomOriginConfig:
+  #             HTTPPort: 80
+  #             HTTPSPort: 443
+  #             OriginKeepaliveTimeout: 5
+  #             OriginProtocolPolicy: "https-only"
+  #             OriginReadTimeout: 30
+  #             OriginSSLProtocols:
+  #               - "SSLv3"
+  #               - "TLSv1"
+  #           OriginCustomHeaders:
+  #             - HeaderName: "X-Forwarded-Host"
+  #               HeaderValue: !Sub "${RailsEnv}.example.com"
+  #       ViewerCertificate:
+  #         AcmCertificateArn: !Ref AcmCertificate
+  #         SslSupportMethod: "sni-only"
+  #         MinimumProtocolVersion: "TLSv1.2_2021"
+  #       Restrictions:
+  #         GeoRestriction:
+  #           RestrictionType: "none"
+
+  # AcmCertificate:
+  #   Type: AWS::CertificateManager::Certificate
+  #   Properties:
+  #     DomainName: !Sub "${RailsEnv}.example.com"
+  #     ValidationMethod: DNS
+  #     DomainValidationOptions:
+  #       - DomainName: !Sub "${RailsEnv}.example.com"
+  #         HostedZoneId: "HOST_ID"
+
+  # Route53Record:
+  #   Type: AWS::Route53::RecordSet
+  #   Properties:
+  #     Name: !Sub "${RailsEnv}.example.com"
+  #     Type: "A"
+  #     HostedZoneId: "HOST"
+  #     AliasTarget:
+  #       DNSName: !GetAtt CloudFrontDistribution.DomainName
+  #       HostedZoneId: "HOST_ID"
+
+  
+Outputs:
+  RailsLambdaUrl:
+    Description: Lambda Function URL
+    Value: !GetAtt RailsLambdaUrl.FunctionUrl

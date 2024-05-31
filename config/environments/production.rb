@@ -18,7 +18,7 @@ Rails.application.configure do
 
   # Ensures that a master key has been made available in ENV["RAILS_MASTER_KEY"], config/master.key, or an environment
   # key such as config/credentials/production.key. This key is used to decrypt credentials (and other encrypted files).
-  # config.require_master_key = true
+  config.require_master_key = false
 
   # Disable serving static files from `public/`, relying on NGINX/Apache to do so instead.
   # config.public_file_server.enabled = false
@@ -56,6 +56,19 @@ Rails.application.configure do
     .tap  { |logger| logger.formatter = ::Logger::Formatter.new }
     .then { |logger| ActiveSupport::TaggedLogging.new(logger) }
 
+  logger = ActiveSupport::Logger.new(STDOUT)
+  logger.formatter = ActiveSupport::Logger::SimpleFormatter.new
+  config.logger    = logger
+  config.public_file_server.headers = {
+    'Cache-Control' => "public, max-age=#{30.days.seconds.to_i}",
+    'X-Lamby-Base64' => '1'
+  }
+  config.log_level = :debug
+  config.lograge.enabled = true
+  config.lograge.formatter = Lograge::Formatters::Json.new
+  config.lograge.custom_payload do |controller|
+    { requestid: controller.request.request_id }
+  end
   # Prepend all log lines with the following tags.
   config.log_tags = [ :request_id ]
 
@@ -68,7 +81,7 @@ Rails.application.configure do
   # config.cache_store = :mem_cache_store
 
   # Use a real queuing backend for Active Job (and separate queues per environment).
-  # config.active_job.queue_adapter = :resque
+  config.active_job.queue_adapter = :lambdakiq
   # config.active_job.queue_name_prefix = "rails_serverlerss_production"
 
   config.action_mailer.perform_caching = false

@@ -1,9 +1,15 @@
 source "https://rubygems.org"
 
-ruby "3.2.0"
+ruby "3.2.2"
 
 # Bundle edge Rails instead: gem "rails", github: "rails/rails", branch: "main"
-gem "rails", "~> 7.1.3", ">= 7.1.3.3"
+gem 'rails', '~> 7.1', '>= 7.1.3.3'
+
+# Serverless Gems
+gem 'lambdakiq', '~> 2.2'
+gem 'lamby', '~> 5.2'
+
+gem "lograge", "~> 0.14.0"
 
 # The original asset pipeline for Rails [https://github.com/rails/sprockets-rails]
 gem "sprockets-rails"
@@ -65,3 +71,4 @@ group :test do
   gem "capybara"
   gem "selenium-webdriver"
 end
+
