@@ -1,9 +1,0 @@
-source 'https://rubygems.org'
-git_source(:github) { |repo| "https://github.com/#{repo}.git" }
-
-ruby '3.2.4'
-
-gem 'net-http', '~> 0.4.1'
-gem 'net-ping'
-
-gem "uri", "~> 0.13.0"
